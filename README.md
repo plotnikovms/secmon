@@ -1,2 +1,2 @@
 # secmon
-Linux Security Monitor
+Linux Rootkit Detector

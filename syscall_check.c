@@ -1,6 +1,5 @@
 #include "checks.h"
 
-#include <linux/extable.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/seq_file.h>
@@ -13,8 +12,17 @@
 #endif
 
 static unsigned long syscall_table_addr;
+static unsigned long kernel_text_start;
+static unsigned long kernel_text_end;
+
 module_param(syscall_table_addr, ulong, 0444);
 MODULE_PARM_DESC(syscall_table_addr, "Address of sys_call_table");
+
+module_param(kernel_text_start, ulong, 0444);
+MODULE_PARM_DESC(kernel_text_start, "Address of _stext");
+
+module_param(kernel_text_end, ulong, 0444);
+MODULE_PARM_DESC(kernel_text_end, "Address of _etext");
 
 static bool read_kernel_ulong(unsigned long address, unsigned long *value)
 {
@@ -23,6 +31,22 @@ static bool read_kernel_ulong(unsigned long address, unsigned long *value)
         (void *)address,
         sizeof(*value)
     ) == 0;
+}
+
+static bool kernel_text_range_is_available(void)
+{
+    return kernel_text_start != 0 &&
+           kernel_text_end != 0 &&
+           kernel_text_start < kernel_text_end;
+}
+
+static bool address_is_inside_kernel_text(unsigned long address)
+{
+    if (!kernel_text_range_is_available()) {
+        return false;
+    }
+
+    return address >= kernel_text_start && address < kernel_text_end;
 }
 
 static void check_kernel_text_address(
@@ -46,19 +70,29 @@ static void check_kernel_text_address(
         return;
     }
 
-    if (!core_kernel_text(address)) {
-        ++(*suspicious_count);
-
+    if (!kernel_text_range_is_available()) {
         seq_printf(
             report,
-            "SUSPICIOUS: %s address is outside core kernel text\n",
+            "INFO: kernel text range is not available, cannot validate %s\n",
             name
         );
 
         return;
     }
 
-    seq_printf(report, "OK: %s address is inside core kernel text\n", name);
+    if (!address_is_inside_kernel_text(address)) {
+        ++(*suspicious_count);
+
+        seq_printf(
+            report,
+            "SUSPICIOUS: %s address is outside kernel text range\n",
+            name
+        );
+
+        return;
+    }
+
+    seq_printf(report, "OK: %s address is inside kernel text range\n", name);
 }
 
 static void check_syscall_entry_points(struct seq_file *report, int *suspicious_count)
@@ -111,30 +145,19 @@ static void check_syscall_handler_address(
         return;
     }
 
-    if (core_kernel_text(handler_address)) {
+    if (!kernel_text_range_is_available()) {
         return;
     }
 
-#ifdef CONFIG_MODULES
-    if (is_module_text_address(handler_address)) {
-        ++(*suspicious_count);
-
-        seq_printf(
-            report,
-            "SUSPICIOUS: syscall[%d] handler points to module text: %px\n",
-            syscall_number,
-            (void *)handler_address
-        );
-
+    if (address_is_inside_kernel_text(handler_address)) {
         return;
     }
-#endif
 
     ++(*suspicious_count);
 
     seq_printf(
         report,
-        "SUSPICIOUS: syscall[%d] handler points outside known kernel text: %px\n",
+        "SUSPICIOUS: syscall[%d] handler points outside kernel text range: %px\n",
         syscall_number,
         (void *)handler_address
     );
@@ -142,12 +165,27 @@ static void check_syscall_handler_address(
 
 static void check_syscall_table(struct seq_file *report, int *suspicious_count)
 {
+    int syscall_number;
+    int unreadable_count = 0;
+
     seq_puts(report, "Checking sys_call_table entries...\n");
 
     if (syscall_table_addr == 0) {
         seq_puts(report, "INFO: syscall_table_addr is not set\n");
         seq_puts(report, "INFO: syscall table check skipped\n");
         return;
+    }
+
+    if (!kernel_text_range_is_available()) {
+        seq_puts(report, "INFO: kernel text range is not set\n");
+        seq_puts(report, "INFO: syscall handler address validation will be limited\n");
+    } else {
+        seq_printf(
+            report,
+            "kernel text range: [%px, %px)\n",
+            (void *)kernel_text_start,
+            (void *)kernel_text_end
+        );
     }
 
     seq_printf(
@@ -158,9 +196,7 @@ static void check_syscall_table(struct seq_file *report, int *suspicious_count)
 
     seq_printf(report, "syscall count: %d\n", __NR_syscalls);
 
-    int unreadable_count = 0;
-
-    for (int syscall_number = 0; syscall_number < __NR_syscalls; ++syscall_number) {
+    for (syscall_number = 0; syscall_number < __NR_syscalls; ++syscall_number) {
         unsigned long table_entry_address;
         unsigned long handler_address;
 
