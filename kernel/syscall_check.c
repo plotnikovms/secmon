@@ -1,9 +1,9 @@
 #include "checks.h"
 
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/seq_file.h>
 #include <linux/uaccess.h>
+#include <linux/kprobes.h>
 
 #include <asm/unistd.h>
 
@@ -15,14 +15,59 @@ static unsigned long syscall_table_addr;
 static unsigned long kernel_text_start;
 static unsigned long kernel_text_end;
 
-module_param(syscall_table_addr, ulong, 0444);
-MODULE_PARM_DESC(syscall_table_addr, "Address of sys_call_table");
+typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
 
-module_param(kernel_text_start, ulong, 0444);
-MODULE_PARM_DESC(kernel_text_start, "Address of _stext");
+static kallsyms_lookup_name_t kallsyms_lookup_name_ptr;
 
-module_param(kernel_text_end, ulong, 0444);
-MODULE_PARM_DESC(kernel_text_end, "Address of _etext");
+static unsigned long lookup_symbol(const char *name)
+{
+    struct kprobe kp = {
+        .symbol_name = "kallsyms_lookup_name",
+    };
+
+    int ret;
+
+    if (!kallsyms_lookup_name_ptr) {
+        ret = register_kprobe(&kp);
+        if (ret < 0) {
+            pr_err("secmon: register_kprobe failed for kallsyms_lookup_name: %d\n", ret);
+            return 0;
+        }
+
+        kallsyms_lookup_name_ptr = (kallsyms_lookup_name_t)kp.addr;
+        unregister_kprobe(&kp);
+
+        if (!kallsyms_lookup_name_ptr) {
+            pr_err("secmon: kallsyms_lookup_name address is NULL\n");
+            return 0;
+        }
+    }
+
+    return kallsyms_lookup_name_ptr(name);
+}
+
+static void resolve_kernel_symbols(struct seq_file *report)
+{
+    syscall_table_addr = lookup_symbol("sys_call_table");
+    kernel_text_start = lookup_symbol("_stext");
+    kernel_text_end = lookup_symbol("_etext");
+
+    if (!syscall_table_addr) {
+        seq_puts(report, "ERROR: failed to resolve sys_call_table\n");
+    }
+
+    if (!kernel_text_start) {
+        seq_puts(report, "ERROR: failed to resolve _stext\n");
+    }
+
+    if (!kernel_text_end) {
+        seq_puts(report, "ERROR: failed to resolve _etext\n");
+    }
+
+    seq_printf(report, "resolved sys_call_table: %px\n", (void *)syscall_table_addr);
+    seq_printf(report, "resolved _stext: %px\n", (void *)kernel_text_start);
+    seq_printf(report, "resolved _etext: %px\n", (void *)kernel_text_end);
+}
 
 static bool read_kernel_ulong(unsigned long address, unsigned long *value)
 {
@@ -171,13 +216,13 @@ static void check_syscall_table(struct seq_file *report, int *suspicious_count)
     seq_puts(report, "Checking sys_call_table entries...\n");
 
     if (syscall_table_addr == 0) {
-        seq_puts(report, "INFO: syscall_table_addr is not set\n");
+        seq_puts(report, "INFO: syscall_table_addr is not available\n");
         seq_puts(report, "INFO: syscall table check skipped\n");
         return;
     }
 
     if (!kernel_text_range_is_available()) {
-        seq_puts(report, "INFO: kernel text range is not set\n");
+        seq_puts(report, "INFO: kernel text range is not available\n");
         seq_puts(report, "INFO: syscall handler address validation will be limited\n");
     } else {
         seq_printf(
@@ -236,6 +281,10 @@ static void check_syscall_table(struct seq_file *report, int *suspicious_count)
 void syscall_check(struct seq_file *report)
 {
     int suspicious_count = 0;
+
+    seq_puts(report, "Resolving kernel symbols...\n");
+    resolve_kernel_symbols(report);
+    seq_puts(report, "\n");
 
     check_syscall_entry_points(report, &suspicious_count);
     seq_puts(report, "\n");
