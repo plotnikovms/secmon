@@ -23,14 +23,6 @@ static int secmon_show(struct seq_file *report, void *unused)
     syscall_check(report);
     seq_puts(report, "\n");
 
-    // seq_puts(report, "[3] Autoload / persistence check\n");
-    // autoload_check(report);
-    // seq_puts(report, "\n");
-
-    // seq_puts(report, "[5] Network backdoor check\n");
-    // network_check(report);
-    // seq_puts(report, "\n");
-
     seq_puts(report, "=== END OF REPORT ===\n");
 
     return 0;
